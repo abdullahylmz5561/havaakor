@@ -87,12 +87,12 @@ object ChordLogic {
         return noteNames[root] + if (st.minor) "m" else ""
     }
 
-    /** Bas + kök + üçlü + beşli. Boş liste = sessizlik. */
+    /** 6 telli gitara benzeyen dizilim (alttan üste). Boş liste = sessizlik. */
     fun frequencies(st: ChordState, key: Int): List<Float> {
         if (st.fingers !in 1..5) return emptyList()
         val root = 60 + key + scale[st.fingers - 1]
         val third = root + if (st.minor) 3 else 4
-        return listOf(root - 12, root, third, root + 7).map { midiToHz(it) }
+        return listOf(root - 12, root - 5, root, third, root + 7, root + 12).map { midiToHz(it) }
     }
 
     private fun midiToHz(m: Int): Float = (440.0 * 2.0.pow((m - 69) / 12.0)).toFloat()
