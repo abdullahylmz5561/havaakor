@@ -81,6 +81,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.LifecycleOwner
 import java.util.concurrent.Executors
 
 class MainActivity : ComponentActivity() {
@@ -184,6 +187,7 @@ fun PlayScreen(incoming: MutableState<String?>) {
     var drumIdx by remember { mutableIntStateOf(2) }
     var drumVol by remember { mutableFloatStateOf(0.7f) }
     var rhythmOn by remember { mutableStateOf(false) }
+    var instrument by remember { mutableIntStateOf(0) }
 
     var showLink by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
@@ -320,6 +324,7 @@ fun PlayScreen(incoming: MutableState<String?>) {
     LaunchedEffect(drumIdx) { synth.setDrums(drumIdx) }
     LaunchedEffect(drumVol) { synth.setDrumVolume(drumVol) }
     LaunchedEffect(rhythmOn) { synth.setRhythm(rhythmOn) }
+    LaunchedEffect(instrument) { synth.setInstrument(instrument) }
 
     // Sıradaki akorun satırına kaydır
     LaunchedEffect(currentEvent, song) {
@@ -332,8 +337,22 @@ fun PlayScreen(incoming: MutableState<String?>) {
     }
 
     DisposableEffect(Unit) {
+        // Uygulama arka plana gidince ses ve ritim tamamen dursun, dönünce temiz başlasın
+        val activity = ctx as ComponentActivity
+        val observer = object : LifecycleEventObserver {
+            override fun onStateChanged(source: LifecycleOwner, event: Lifecycle.Event) {
+                if (event == Lifecycle.Event.ON_PAUSE) {
+                    synth.stop()
+                    rhythmOn = false
+                } else if (event == Lifecycle.Event.ON_RESUME) {
+                    synth.start()
+                }
+            }
+        }
+        activity.lifecycle.addObserver(observer)
         synth.start()
         onDispose {
+            activity.lifecycle.removeObserver(observer)
             synth.stop()
             analyzer?.close()
             executor.shutdown()
@@ -451,6 +470,10 @@ fun PlayScreen(incoming: MutableState<String?>) {
                 )
                 Text(nextText, fontSize = 13.sp)
             }
+            OutlinedButton(
+                onClick = { instrument = 1 - instrument },
+                contentPadding = PaddingValues(horizontal = 10.dp),
+            ) { Text(Instruments.names[instrument], maxLines = 1) }
         }
 
         Row(
@@ -578,7 +601,11 @@ fun PlayScreen(incoming: MutableState<String?>) {
                     OutlinedButton(onClick = { tap() }) { Text("TAP: şarkıyla birlikte vur") }
 
                     Spacer(Modifier.height(12.dp))
-                    Text("Gitar vuruşu")
+                    Text("Ses")
+                    ChipRow(Instruments.names, instrument) { instrument = it }
+
+                    Spacer(Modifier.height(12.dp))
+                    Text("Vuruş kalıbı")
                     ChipRow(Rhythms.strumNames, strumIdx) { strumIdx = it }
 
                     Spacer(Modifier.height(12.dp))

@@ -13,14 +13,20 @@ import kotlin.math.sin
 // ---- Ayarlanabilir sabitler ----
 private const val MAX_STRINGS = 6
 private const val BUF_SIZE = 2048      // en düşük ~22 Hz'e kadar yeter
-private const val STRUM_GAP_MS = 14    // teller arası gecikme (strum hızı)
+private const val STRUM_GAP_MS = 14    // gitar: teller arası gecikme (strum hızı)
+private const val PIANO_GAP_MS = 2     // piyano: notalar neredeyse aynı anda basılır
 private const val DEBOUNCE_MS = 60     // akor değişimi bu kadar sürmeli (titremeyi önler)
-private const val SUSTAIN = 0.9985f    // 1'e yaklaştıkça tel daha uzun ötüyor
-private const val MUTED = 0.90f        // susturunca tellerin hızlı sönmesi
+private const val SUSTAIN = 0.9985f    // gitar: 1'e yaklaştıkça tel daha uzun ötüyor
+private const val MUTED = 0.90f        // gitar: susturunca tellerin hızlı sönmesi
+
+/** Ses seçenekleri: 0 = gitar, 1 = elektrik piyano. */
+object Instruments {
+    val names = listOf("Gitar", "Piyano")
+}
 
 /**
  * Bir ölçü = 8 adım (sekizlik notalar, 4/4).
- * Gitar kalıbı: D = aşağı vuruş, U = yukarı vuruş, . = boş, 0..5 = tek tel (arpej).
+ * Vuruş kalıbı: D = aşağı vuruş, U = yukarı vuruş, . = boş, 0..5 = tek tel/nota (arpej).
  * Davul kalıbı: [kick, snare, hi-hat], x = vuruş.
  */
 object Rhythms {
@@ -61,6 +67,12 @@ private class GuitarString(private val sampleRate: Int) {
     private var apIn = 0f
     private var apOut = 0f
 
+    fun clear() {
+        buf.fill(0f)
+        apIn = 0f
+        apOut = 0f
+    }
+
     fun pluck(freq: Float, velocity: Float, noise: Rng) {
         val d = sampleRate / freq - 0.5f
         val n = floor(d).toInt().coerceIn(2, BUF_SIZE - 1)
@@ -91,11 +103,80 @@ private class GuitarString(private val sampleRate: Int) {
 }
 
 /**
- * Gitar + davul motoru.
- * - Ritim kapalıyken: akor değişince teller bir kez strum edilir.
+ * Elektrik piyano (Rhodes tarzı) tek nota: FM sentezi.
+ * Taşıyıcı sinüsü, aynı frekanstaki bir modülatörle bükülür; modülasyon derinliği hızla
+ * azalır (vuruşta parlak, sonra yumuşak). Kısa, yüksek bir "tine" çınlaması vuruşa karakter
+ * katar. Yüksek notalar daha çabuk söner.
+ */
+private class PianoVoice(private val sampleRate: Int) {
+    private val twoPi = (2.0 * PI).toFloat()
+    private val modDecay = exp(-5.0 / sampleRate).toFloat()
+    private val tineDecay = exp(-55.0 / sampleRate).toFloat()
+    private val dampDecay = exp(-30.0 / sampleRate).toFloat()
+
+    private var freq = 0f
+    private var pc = 0f
+    private var pm = 0f
+    private var pt = 0f
+    private var env = 0f
+    private var peak = 0f
+    private var attack = false
+    private var modEnv = 0f
+    private var tineEnv = 0f
+    private var decayPerSample = 0.9999f
+
+    fun clear() {
+        env = 0f
+        peak = 0f
+        attack = false
+        modEnv = 0f
+        tineEnv = 0f
+    }
+
+    fun trigger(f: Float, vel: Float) {
+        freq = f
+        peak = vel
+        attack = true
+        modEnv = vel
+        tineEnv = vel
+        val rate = 0.7 + f / 450.0
+        decayPerSample = exp(-rate / sampleRate).toFloat()
+    }
+
+    /** damp = true ise (yumruk) hızla susar. */
+    fun next(damp: Boolean): Float {
+        if (!attack && env < 0.0005f) return 0f
+        if (attack) {
+            env += (peak - env) * 0.012f
+            if (env >= peak * 0.97f) attack = false
+        } else {
+            env *= if (damp) dampDecay else decayPerSample
+        }
+        modEnv *= modDecay
+        tineEnv *= tineDecay
+
+        val inc = twoPi * freq / sampleRate
+        pc += inc
+        pm += inc
+        pt += inc * 9f
+        if (pc > twoPi) pc -= twoPi
+        if (pm > twoPi) pm -= twoPi
+        if (pt > twoPi) pt -= twoPi
+
+        val mod = sin(pm) * (0.4f + 2.2f * modEnv)
+        val tone = sin(pc + mod)
+        val tine = sin(pt) * tineEnv * 0.25f
+        return (tone + tine) * env
+    }
+}
+
+/**
+ * Gitar/piyano + davul motoru.
+ * - Ritim kapalıyken: akor değişince akor bir kez çalınır (gitarda strum, piyanoda blok akor).
  * - Ritim açıkken: tempoya (BPM) bağlı bir saat çalışır; her adımda seçili vuruş kalıbı
  *   o anki akoru çalar, davul kalıbı da aynı saatten tetiklenir. Akor değişimi sonraki
  *   vuruşa oturur.
+ * - stop() sesi tamamen keser; start() temiz bir durumla yeniden başlatır.
  */
 class ChordSynth {
     private val sampleRate = 44100
@@ -110,6 +191,7 @@ class ChordSynth {
     @Volatile private var drumIdx = 0
     @Volatile private var drumVol = 0.7f
     @Volatile private var rhythmOn = false
+    @Volatile private var instrument = 0
     @Volatile private var running = false
     private var thread: Thread? = null
 
@@ -119,18 +201,21 @@ class ChordSynth {
 
     // ---- yalnız ses thread'i kullanır ----
     private val strings = Array(MAX_STRINGS) { GuitarString(sampleRate) }
+    private val voices = Array(MAX_STRINGS) { PianoVoice(sampleRate) }
     private val noise = Rng()
     private val countdown = IntArray(MAX_STRINGS) { -1 }
     private val velocity = FloatArray(MAX_STRINGS)
     private var notes = FloatArray(0)
     private var muted = true
     private var seenVersion = 0
+    private var activeInstrument = 0
     private var wasRunning = false
     private var step = 0
     private var stepCountdown = 0
     private var gain = 0f
     private var lp = 0f
     private val gapSamples = sampleRate * STRUM_GAP_MS / 1000
+    private val pianoGap = sampleRate * PIANO_GAP_MS / 1000
 
     private var kickEnv = 0f
     private var kickFreq = 48f
@@ -145,7 +230,7 @@ class ChordSynth {
     private val hatDecay = exp(-60.0 / sampleRate).toFloat()
     private val twoPi = (2.0 * PI).toFloat()
 
-    /** Boş liste = sustur. En fazla 6 nota (alttan üste, tel sırasıyla). */
+    /** Boş liste = sustur. En fazla 6 nota (alttan üste). */
     fun setChord(f: List<Float>) {
         val arr = f.take(MAX_STRINGS).toFloatArray()
         val now = SystemClock.uptimeMillis()
@@ -187,8 +272,28 @@ class ChordSynth {
         rhythmOn = on
     }
 
+    fun setInstrument(i: Int) {
+        instrument = i.coerceIn(0, Instruments.names.size - 1)
+    }
+
     private fun strum(down: Boolean, v: Float) {
         val n = notes.size
+        if (activeInstrument == 1) {
+            if (down) {
+                // blok akor: tüm notalar neredeyse aynı anda
+                for (i in 0 until n) {
+                    countdown[i] = i * pianoGap
+                    velocity[i] = v
+                }
+            } else {
+                // yukarı vuruş: yalnız üst notalar, daha hafif
+                for (i in 2 until n) {
+                    countdown[i] = (i - 2) * pianoGap
+                    velocity[i] = v * 0.7f
+                }
+            }
+            return
+        }
         for (i in 0 until n) {
             countdown[i] = (if (down) i else n - 1 - i) * gapSamples
             velocity[i] = v
@@ -200,6 +305,31 @@ class ChordSynth {
             countdown[k] = 0
             velocity[k] = v
         }
+    }
+
+    private fun clearVoices() {
+        for (s in strings) s.clear()
+        for (v in voices) v.clear()
+        for (k in 0 until MAX_STRINGS) countdown[k] = -1
+    }
+
+    /** Durdurulup yeniden başlatılınca eski akor ve vuruşlardan hiçbir şey kalmasın. */
+    private fun resetState() {
+        clearVoices()
+        notes = FloatArray(0)
+        muted = true
+        committed = FloatArray(0)
+        pending = FloatArray(0)
+        seenVersion = version
+        activeInstrument = instrument
+        gain = 0f
+        lp = 0f
+        kickEnv = 0f
+        snareEnv = 0f
+        hatEnv = 0f
+        step = 0
+        stepCountdown = 0
+        wasRunning = false
     }
 
     private fun fireStep(s: Int) {
@@ -222,6 +352,7 @@ class ChordSynth {
 
     fun start() {
         if (running) return
+        resetState()
         running = true
         thread = Thread {
             val minBuf = AudioTrack.getMinBufferSize(
@@ -251,6 +382,15 @@ class ChordSynth {
             val gainCoef = 0.0012f
 
             while (running) {
+                // Ses değişti mi?
+                val inst = instrument
+                if (inst != activeInstrument) {
+                    clearVoices()
+                    activeInstrument = inst
+                    if (!muted && notes.isNotEmpty() && !rhythmOn) strum(true, 1f)
+                }
+                val piano = activeInstrument == 1
+
                 // Akor değişti mi?
                 val ver = version
                 if (ver != seenVersion) {
@@ -278,6 +418,7 @@ class ChordSynth {
                 val cutoff = 1500f + brightness * brightness * 9000f
                 val a = 1f - exp(-2f * PI.toFloat() * cutoff / sampleRate)
                 val dv = drumVol
+                val inScale = if (piano) 0.18f else 0.25f
 
                 for (i in buf.indices) {
                     if (rOn) {
@@ -294,14 +435,20 @@ class ChordSynth {
                     for (k in 0 until MAX_STRINGS) {
                         val cd = countdown[k]
                         if (cd == 0) {
-                            if (k < notes.size) strings[k].pluck(notes[k], velocity[k], noise)
+                            if (k < notes.size) {
+                                if (piano) {
+                                    voices[k].trigger(notes[k], velocity[k])
+                                } else {
+                                    strings[k].pluck(notes[k], velocity[k], noise)
+                                }
+                            }
                             countdown[k] = -1
                         } else if (cd > 0) {
                             countdown[k] = cd - 1
                         }
-                        s += strings[k].next(decay)
+                        s += if (piano) voices[k].next(muted) else strings[k].next(decay)
                     }
-                    lp += a * (s * 0.25f - lp)
+                    lp += a * (s * inScale - lp)
                     var out = lp * gain
 
                     // Davul (süzgeçten geçmez; hi-hat parlak kalsın)
