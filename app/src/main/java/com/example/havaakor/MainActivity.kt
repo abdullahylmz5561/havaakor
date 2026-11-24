@@ -664,7 +664,7 @@ fun PlayScreen(incoming: MutableState<String?>) {
 
                     Spacer(Modifier.height(12.dp))
                     Text("Kalıp")
-                    val labels = presets.map { it.name } + (if (customAllowed) listOf("Özel") else emptyList())
+                    val labels = presets.map { it.name } + (if (customAllowed) listOf("Özel") else emptyList<String>())
                     ChipRow(labels, sel) { patSel[patKey] = it }
                     if (sel < presets.size) {
                         Text(presets[sel].code, fontFamily = FontFamily.Monospace, fontSize = 12.sp)

@@ -35,6 +35,23 @@ Sağdaki el: yukarı–aşağı = gitar ses seviyesi, sağa–sola = tını parl
 - Ayrıştırıcı sözlerin üstündeki akor satırlarını (`Am   G`) ve `[Am]söz` biçimini tanır. Her sitenin yapısı farklı olduğu için bazı sayfalarda akor yerleri kayabilir veya hiç bulunamayabilir.
 - Kamera üstündeki rehber her jestin hangi akor olduğunu gösterir; sarı çerçeve sıradaki akordur. Çaldığınız akor sıradakiyle eşleşince şarkı ilerler; bir satıra dokunarak oraya atlayabilirsiniz.
 
+## Ses
+
+Gitar (Karplus-Strong) ve elektrik piyano (FM sentezi, Rhodes tarzı). Ana ekranda başlığın sağındaki düğmeyle ya da Ayarlar > Ses'ten geçilir. Piyanoda akor blok olarak (notalar birlikte) çalınır, yukarı vuruş yalnız üst notaları çalar, arpej kalıbı notaları tek tek çalar.
+
+Uygulama arka plana gidince ses ve ritim tamamen kesilir; dönünce ritim kapalı başlar.
+
+## Menü: Ses > Stil > Kalıp (Ayarlar)
+
+- **Ses:** Gitar / Piyano. **Stil:** Ritim / Arpej. Kalıp listesi seçime göre değişir.
+- **Gitar ritim** (A aşağı, Y yukarı, - kapatma, . boş): Pop `A.AY.YAY`, Rock `A.A.AYA.`, Sekizlik `AYAYAYAY`, Balad `A...A.Y.`, Kesik `A-AY-YAY`, Serbest `A.......`. "Özel" kutusuna kendi kalıbını yaz (2–16 karakter).
+- **Gitar arpej** (p başparmak/bas, i işaret, m orta, a yüzük): Klasik 8'li `p-i-m-i-a-i-m-i`, Yükselen 8'li, Süzülen 6'lı (6/8), Vals 6'lı. "Özel" kutusu burada da var.
+- **Piyano ritim** (bas ve akor katmanlı): Uzun akor, Bas + akor, Pop piyano, Enerjik, Vals (3/4), Serbest. **Piyano arpej:** Yükselen 8'li, Alberti, Süzülen 6'lı.
+- Kalıp uzunluğu ölçüyü belirler: 8 adım = 4/4, 6 adım = 6/8. Davul kalıpları 8 ve 6 adımlık sürümlere sahip; başka uzunlukta özel kalıpta davul yalnız hi-hat çalar.
+- Güçlü vuruşlar daha gür, her vuruşta çok küçük zaman/şiddet farkı (insan dokunuşu) var. Piyanoda akor değişince önceki akorun notaları hızla bırakılır (pedal etkisi).
+- **Tek el modu:** yalnız akor eli kullanılır, ses seviyesi o elin yüksekliğinden gelir.
+- Ses, stil, kalıp, özel kalıplar, tempo, davul, ton ve diğer ayarlar telefona kaydedilir.
+
 ## Ritim
 
 - **Ritim ▶** düğmesi tempo saatini başlatır. Gitar kalıbı ve davul aynı saatten çalışır; akor değişimi sonraki vuruşa oturur.

@@ -88,13 +88,28 @@ object HandReader {
         return Pair(chordHand, fxHand)
     }
 
-    fun read(hands: List<Hand>, swapHands: Boolean): HandState {
+    /**
+     * singleHand = true: yalnız bir el kullanılır (ekranın solundaki, solaklar için sağdaki).
+     * Ses seviyesi aynı elin yüksekliğinden gelir, parlaklık sabit kalır.
+     */
+    fun read(hands: List<Hand>, swapHands: Boolean, singleHand: Boolean = false): HandState {
         val valid = hands.filter { it.pts.size >= 21 }
         if (valid.isEmpty()) {
             lastGesture = 0
             tilted = false
             return HandState(0, false, 0.6f, 0.5f)
         }
+        if (singleHand) {
+            val sorted = valid.sortedBy { 1f - it.pts[0].x }
+            val ch = if (swapHands) sorted.last() else sorted.first()
+            val g = classify(fingerStates(ch))
+            val gesture = if (g >= 0) g else lastGesture
+            lastGesture = gesture
+            val tiltNow = updateTilt(ch)
+            val volume = 0.15f + 0.85f * (1f - ch.pts[0].y).coerceIn(0f, 1f)
+            return HandState(gesture, tiltNow, volume, 0.5f)
+        }
+
         val (chordHand, fxHand) = pick(valid, swapHands)
 
         var gesture = 0
