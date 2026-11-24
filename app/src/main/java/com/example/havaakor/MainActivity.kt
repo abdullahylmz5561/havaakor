@@ -1,6 +1,7 @@
 package com.example.havaakor
 
 import android.Manifest
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
@@ -58,6 +59,7 @@ import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -172,9 +174,11 @@ fun PlayScreen(incoming: MutableState<String?>) {
     var label by remember { mutableStateOf("—") }
     var gesture by remember { mutableIntStateOf(0) }
     var bank by remember { mutableIntStateOf(0) }
-    var swap by remember { mutableStateOf(false) }
-    var transpose by remember { mutableIntStateOf(0) }
-    var showLegend by remember { mutableStateOf(true) }
+    val prefs = remember { ctx.getSharedPreferences("havaakor", Context.MODE_PRIVATE) }
+    var swap by remember { mutableStateOf(prefs.getBoolean("swap", false)) }
+    var singleHand by remember { mutableStateOf(prefs.getBoolean("single", false)) }
+    var transpose by remember { mutableIntStateOf(prefs.getInt("transpose", 0).coerceIn(-6, 6)) }
+    var showLegend by remember { mutableStateOf(prefs.getBoolean("legend", true)) }
 
     var song by remember { mutableStateOf<Song?>(null) }
     var chordText by remember { mutableStateOf(DEFAULT_CHORDS.joinToString(", ")) }
@@ -182,12 +186,39 @@ fun PlayScreen(incoming: MutableState<String?>) {
     val specs = remember(chordNames) { chordNames.map { parseChord(it) } }
     var currentEvent by remember { mutableIntStateOf(-1) }
 
-    var bpm by remember { mutableIntStateOf(90) }
-    var strumIdx by remember { mutableIntStateOf(0) }
-    var drumIdx by remember { mutableIntStateOf(2) }
-    var drumVol by remember { mutableFloatStateOf(0.7f) }
+    var bpm by remember { mutableIntStateOf(prefs.getInt("bpm", 90).coerceIn(50, 160)) }
+    var drumIdx by remember {
+        mutableIntStateOf(prefs.getInt("drum", 2).coerceIn(0, DrumKits.names.size - 1))
+    }
+    var drumVol by remember { mutableFloatStateOf(prefs.getFloat("drumVol", 0.7f).coerceIn(0f, 1f)) }
     var rhythmOn by remember { mutableStateOf(false) }
-    var instrument by remember { mutableIntStateOf(0) }
+    var instrument by remember { mutableIntStateOf(prefs.getInt("instrument", 0).coerceIn(0, 1)) }
+    var style by remember { mutableIntStateOf(prefs.getInt("style", 0).coerceIn(0, 1)) }
+    val patSel = remember {
+        mutableStateListOf(
+            prefs.getInt("pat0", 0), prefs.getInt("pat1", 0),
+            prefs.getInt("pat2", 0), prefs.getInt("pat3", 0),
+        )
+    }
+    var customStrum by remember { mutableStateOf(prefs.getString("customStrum", "AYAY-AY") ?: "AYAY-AY") }
+    var customArp by remember { mutableStateOf(prefs.getString("customArp", "p-i-m-a-m-i") ?: "p-i-m-a-m-i") }
+
+    // Seçili kalıp: hazır listeden ya da (yalnız gitarda) kullanıcının yazdığı özel kalıp
+    val presets = Patterns.presets(instrument, style)
+    val patKey = instrument * 2 + style
+    val customAllowed = instrument == 0
+    val sel = patSel[patKey].coerceIn(0, if (customAllowed) presets.size else presets.size - 1)
+    val customText = if (style == 0) customStrum else customArp
+    val customSteps = remember(customText, style) {
+        if (style == 0) Patterns.parseStrum(customText) else Patterns.parseArpej(customText)
+    }
+    val activePattern = remember(instrument, style, sel, customText) {
+        if (customAllowed && sel == presets.size && customSteps != null) {
+            Pattern("Özel", customText, customSteps)
+        } else {
+            presets[if (sel < presets.size) sel else 0]
+        }
+    }
 
     var showLink by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
@@ -202,6 +233,7 @@ fun PlayScreen(incoming: MutableState<String?>) {
 
     // Analiz thread'inin okuyacağı güncel değerler
     val swapRef = rememberUpdatedState(swap)
+    val singleRef = rememberUpdatedState(singleHand)
     val specsRef = rememberUpdatedState(specs)
     val transposeRef = rememberUpdatedState(transpose)
     val songRef = rememberUpdatedState(song)
@@ -211,7 +243,7 @@ fun PlayScreen(incoming: MutableState<String?>) {
     val analyzerResult = remember {
         runCatching {
             HandAnalyzer(ctx) { detected ->
-                val st = HandReader.read(detected, swapRef.value)
+                val st = HandReader.read(detected, swapRef.value, singleRef.value)
                 synth.setVolume(st.volume)
                 synth.setBrightness(st.brightness)
                 val idx = if (st.gesture in 1..SLOTS) {
@@ -320,7 +352,29 @@ fun PlayScreen(incoming: MutableState<String?>) {
     }
 
     LaunchedEffect(bpm) { synth.setBpm(bpm) }
-    LaunchedEffect(strumIdx) { synth.setStrum(strumIdx) }
+    LaunchedEffect(activePattern) { synth.setPattern(activePattern) }
+    LaunchedEffect(
+        instrument, style, patSel.toList(), customStrum, customArp, bpm,
+        drumIdx, drumVol, transpose, swap, singleHand, showLegend,
+    ) {
+        prefs.edit()
+            .putInt("instrument", instrument)
+            .putInt("style", style)
+            .putInt("pat0", patSel[0])
+            .putInt("pat1", patSel[1])
+            .putInt("pat2", patSel[2])
+            .putInt("pat3", patSel[3])
+            .putString("customStrum", customStrum)
+            .putString("customArp", customArp)
+            .putInt("bpm", bpm)
+            .putInt("drum", drumIdx)
+            .putFloat("drumVol", drumVol)
+            .putInt("transpose", transpose)
+            .putBoolean("swap", swap)
+            .putBoolean("single", singleHand)
+            .putBoolean("legend", showLegend)
+            .apply()
+    }
     LaunchedEffect(drumIdx) { synth.setDrums(drumIdx) }
     LaunchedEffect(drumVol) { synth.setDrumVolume(drumVol) }
     LaunchedEffect(rhythmOn) { synth.setRhythm(rhythmOn) }
@@ -605,12 +659,53 @@ fun PlayScreen(incoming: MutableState<String?>) {
                     ChipRow(Instruments.names, instrument) { instrument = it }
 
                     Spacer(Modifier.height(12.dp))
-                    Text("Vuruş kalıbı")
-                    ChipRow(Rhythms.strumNames, strumIdx) { strumIdx = it }
+                    Text("Stil")
+                    ChipRow(listOf("Ritim", "Arpej"), style) { style = it }
+
+                    Spacer(Modifier.height(12.dp))
+                    Text("Kalıp")
+                    val labels = presets.map { it.name } + (if (customAllowed) listOf("Özel") else emptyList())
+                    ChipRow(labels, sel) { patSel[patKey] = it }
+                    if (sel < presets.size) {
+                        Text(presets[sel].code, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+                    } else {
+                        OutlinedTextField(
+                            value = customText,
+                            onValueChange = {
+                                if (style == 0) {
+                                    customStrum = it
+                                } else {
+                                    customArp = it
+                                }
+                            },
+                            label = {
+                                Text(
+                                    if (style == 0) "Özel vuruş (A aşağı, Y yukarı, - kapat, . boş)"
+                                    else "Özel arpej (p i m a, . boş)"
+                                )
+                            },
+                            isError = customSteps == null,
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        if (customSteps == null) {
+                            Text(
+                                "2–16 geçerli karakter gerekli; şimdilik ilk kalıp çalıyor.",
+                                color = Color.Red,
+                                fontSize = 12.sp,
+                            )
+                        }
+                    }
+                    val meter = when (activePattern.length) {
+                        8 -> "4/4 (8 adım)"
+                        6 -> "6/8 (6 adım)"
+                        else -> "${activePattern.length} adım (davul: yalnız hi-hat)"
+                    }
+                    Text("Ölçü: $meter", fontSize = 12.sp)
 
                     Spacer(Modifier.height(12.dp))
                     Text("Davul")
-                    ChipRow(Rhythms.drumNames, drumIdx) { drumIdx = it }
+                    ChipRow(DrumKits.names, drumIdx) { drumIdx = it }
                     Text("Davul sesi")
                     Slider(value = drumVol, onValueChange = { drumVol = it }, valueRange = 0f..1f)
 
@@ -627,6 +722,10 @@ fun PlayScreen(incoming: MutableState<String?>) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text("Solak modu", modifier = Modifier.weight(1f))
                         Switch(checked = swap, onCheckedChange = { swap = it })
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Tek el modu (ses seviyesi el yüksekliğinden)", modifier = Modifier.weight(1f))
+                        Switch(checked = singleHand, onCheckedChange = { singleHand = it })
                     }
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text("Jest rehberi", modifier = Modifier.weight(1f))
