@@ -17,30 +17,14 @@ private const val STRUM_GAP_MS = 14    // gitar: teller arası gecikme (strum h�
 private const val PIANO_GAP_MS = 2     // piyano: notalar neredeyse aynı anda basılır
 private const val DEBOUNCE_MS = 60     // akor değişimi bu kadar sürmeli (titremeyi önler)
 private const val SUSTAIN = 0.9985f    // gitar: 1'e yaklaştıkça tel daha uzun ötüyor
-private const val MUTED = 0.90f        // gitar: susturunca tellerin hızlı sönmesi
+private const val MUTED = 0.90f        // gitar: yumrukla susturunca tellerin sönmesi
+private const val DAMP = 0.60f         // gitar: '-' kapatma, kısa süre hızlı sönme
+private const val DAMP_MS = 50         // '-' kapatmanın süresi
+private const val JITTER_MS = 5        // insan dokunuşu: vuruşlara eklenen en çok gecikme
 
 /** Ses seçenekleri: 0 = gitar, 1 = elektrik piyano. */
 object Instruments {
     val names = listOf("Gitar", "Piyano")
-}
-
-/**
- * Bir ölçü = 8 adım (sekizlik notalar, 4/4).
- * Vuruş kalıbı: D = aşağı vuruş, U = yukarı vuruş, . = boş, 0..5 = tek tel/nota (arpej).
- * Davul kalıbı: [kick, snare, hi-hat], x = vuruş.
- */
-object Rhythms {
-    val strumNames = listOf("Pop", "Rock", "Sekizlik", "Arpej", "Serbest")
-    val strums = listOf("D.DU.UDU", "D.D.DUD.", "DUDUDUDU", "01234543", "D.......")
-
-    val drumNames = listOf("Kapalı", "Hi-hat", "Pop", "Rock", "Balad")
-    val drums = listOf(
-        listOf("........", "........", "........"),
-        listOf("........", "........", "xxxxxxxx"),
-        listOf("x...x...", "..x...x.", "x.x.x.x."),
-        listOf("x...x.x.", "..x...x.", "xxxxxxxx"),
-        listOf("x.......", "....x...", "x.x.x.x."),
-    )
 }
 
 /** Hızlı, kendi içinde tutarlı rastgele sayı üreteci (-1..1). */
@@ -121,6 +105,7 @@ private class PianoVoice(private val sampleRate: Int) {
     private var env = 0f
     private var peak = 0f
     private var attack = false
+    private var releasing = false
     private var modEnv = 0f
     private var tineEnv = 0f
     private var decayPerSample = 0.9999f
@@ -129,28 +114,35 @@ private class PianoVoice(private val sampleRate: Int) {
         env = 0f
         peak = 0f
         attack = false
+        releasing = false
         modEnv = 0f
         tineEnv = 0f
+    }
+
+    /** Pedal bırakma: yeni vuruş gelene kadar nota hızla söner. */
+    fun release() {
+        releasing = true
     }
 
     fun trigger(f: Float, vel: Float) {
         freq = f
         peak = vel
         attack = true
+        releasing = false
         modEnv = vel
         tineEnv = vel
         val rate = 0.7 + f / 450.0
         decayPerSample = exp(-rate / sampleRate).toFloat()
     }
 
-    /** damp = true ise (yumruk) hızla susar. */
+    /** damp = true ise (yumruk, kapatma) hızla susar. */
     fun next(damp: Boolean): Float {
         if (!attack && env < 0.0005f) return 0f
         if (attack) {
             env += (peak - env) * 0.012f
             if (env >= peak * 0.97f) attack = false
         } else {
-            env *= if (damp) dampDecay else decayPerSample
+            env *= if (damp || releasing) dampDecay else decayPerSample
         }
         modEnv *= modDecay
         tineEnv *= tineDecay
@@ -173,9 +165,9 @@ private class PianoVoice(private val sampleRate: Int) {
 /**
  * Gitar/piyano + davul motoru.
  * - Ritim kapalıyken: akor değişince akor bir kez çalınır (gitarda strum, piyanoda blok akor).
- * - Ritim açıkken: tempoya (BPM) bağlı bir saat çalışır; her adımda seçili vuruş kalıbı
+ * - Ritim açıkken: tempoya (BPM) bağlı bir saat çalışır; her adımda seçili kalıp
  *   o anki akoru çalar, davul kalıbı da aynı saatten tetiklenir. Akor değişimi sonraki
- *   vuruşa oturur.
+ *   vuruşa oturur. Kalıp uzunluğu ölçüyü belirler (8 adım = 4/4, 6 adım = 6/8).
  * - stop() sesi tamamen keser; start() temiz bir durumla yeniden başlatır.
  */
 class ChordSynth {
@@ -187,7 +179,7 @@ class ChordSynth {
     @Volatile private var volume = 0.6f
     @Volatile private var brightness = 0.5f
     @Volatile private var bpm = 90
-    @Volatile private var strumIdx = 0
+    @Volatile private var pattern: Pattern = Patterns.guitarRhythm[0]
     @Volatile private var drumIdx = 0
     @Volatile private var drumVol = 0.7f
     @Volatile private var rhythmOn = false
@@ -209,13 +201,20 @@ class ChordSynth {
     private var muted = true
     private var seenVersion = 0
     private var activeInstrument = 0
+    private var activePattern: Pattern = pattern
+    private var drumRows: List<String> = DrumKits.rows(0, 8)
+    private var lastDrum = 0
+    private var lastLen = 8
     private var wasRunning = false
     private var step = 0
     private var stepCountdown = 0
+    private var dampLeft = 0
     private var gain = 0f
     private var lp = 0f
     private val gapSamples = sampleRate * STRUM_GAP_MS / 1000
     private val pianoGap = sampleRate * PIANO_GAP_MS / 1000
+    private val dampSamples = sampleRate * DAMP_MS / 1000
+    private val jitterMax = sampleRate * JITTER_MS / 1000
 
     private var kickEnv = 0f
     private var kickFreq = 48f
@@ -256,12 +255,12 @@ class ChordSynth {
         bpm = v.coerceIn(40, 220)
     }
 
-    fun setStrum(i: Int) {
-        strumIdx = i.coerceIn(0, Rhythms.strums.size - 1)
+    fun setPattern(p: Pattern) {
+        pattern = p
     }
 
     fun setDrums(i: Int) {
-        drumIdx = i.coerceIn(0, Rhythms.drums.size - 1)
+        drumIdx = i.coerceIn(0, DrumKits.names.size - 1)
     }
 
     fun setDrumVolume(v: Float) {
@@ -276,34 +275,24 @@ class ChordSynth {
         instrument = i.coerceIn(0, Instruments.names.size - 1)
     }
 
-    private fun strum(down: Boolean, v: Float) {
-        val n = notes.size
-        if (activeInstrument == 1) {
-            if (down) {
-                // blok akor: tüm notalar neredeyse aynı anda
-                for (i in 0 until n) {
-                    countdown[i] = i * pianoGap
-                    velocity[i] = v
-                }
-            } else {
-                // yukarı vuruş: yalnız üst notalar, daha hafif
-                for (i in 2 until n) {
-                    countdown[i] = (i - 2) * pianoGap
-                    velocity[i] = v * 0.7f
-                }
-            }
-            return
-        }
-        for (i in 0 until n) {
-            countdown[i] = (if (down) i else n - 1 - i) * gapSamples
-            velocity[i] = v
-        }
-    }
+    private fun jitter(): Int = ((noise.next() + 1f) * 0.5f * jitterMax).toInt()
 
-    private fun pluckOne(k: Int, v: Float) {
-        if (k < notes.size) {
-            countdown[k] = 0
-            velocity[k] = v
+    /** Ritim kapalıyken akor değişince çalınan tek vuruş. */
+    private fun onceStep(): Step =
+        if (activeInstrument == 1) Patterns.pianoBlock else Patterns.guitarStrumOnce
+
+    /** Bir adımdaki notaları zamanlar: countdown[k] kaç örnek sonra çalınacağını belirler. */
+    private fun schedule(st: Step, human: Boolean) {
+        if (notes.isEmpty() || muted) return
+        val gap = if (activeInstrument == 1) pianoGap else gapSamples
+        val n = st.slots.size
+        for (idx in 0 until n) {
+            val k = st.slots[idx]
+            if (k >= notes.size) continue
+            val order = if (st.kind == KIND_UP) n - 1 - idx else idx
+            val delay = if (st.kind == KIND_BLOCK && n == 1) 0 else order * gap
+            countdown[k] = delay + (if (human) jitter() else 0)
+            velocity[k] = st.vels[idx] * (if (human) 1f + noise.next() * 0.07f else 1f)
         }
     }
 
@@ -322,32 +311,34 @@ class ChordSynth {
         pending = FloatArray(0)
         seenVersion = version
         activeInstrument = instrument
+        activePattern = pattern
+        lastDrum = drumIdx
+        lastLen = activePattern.length
+        drumRows = DrumKits.rows(lastDrum, lastLen)
         gain = 0f
         lp = 0f
         kickEnv = 0f
         snareEnv = 0f
         hatEnv = 0f
+        dampLeft = 0
         step = 0
         stepCountdown = 0
         wasRunning = false
     }
 
     private fun fireStep(s: Int) {
-        if (notes.isNotEmpty() && !muted) {
-            val c = Rhythms.strums[strumIdx][s]
-            when {
-                c == 'D' -> strum(true, if (s == 0) 1f else 0.85f)
-                c == 'U' -> strum(false, 0.6f)
-                c in '0'..'5' -> pluckOne(c - '0', 0.9f)
-            }
+        val st = activePattern.steps[s]
+        when (st.kind) {
+            KIND_NONE -> {}
+            KIND_DAMP -> dampLeft = dampSamples
+            else -> schedule(st, true)
         }
-        val d = Rhythms.drums[drumIdx]
-        if (d[0][s] == 'x') {
+        if (drumRows[0][s] == 'x') {
             kickEnv = 1f
             kickFreq = 140f
         }
-        if (d[1][s] == 'x') snareEnv = 1f
-        if (d[2][s] == 'x') hatEnv = if (s % 2 == 0) 1f else 0.6f
+        if (drumRows[1][s] == 'x') snareEnv = 1f
+        if (drumRows[2][s] == 'x') hatEnv = if (s % 2 == 0) 1f else 0.6f
     }
 
     fun start() {
@@ -382,12 +373,12 @@ class ChordSynth {
             val gainCoef = 0.0012f
 
             while (running) {
-                // Ses değişti mi?
+                // Ses (gitar/piyano) değişti mi?
                 val inst = instrument
                 if (inst != activeInstrument) {
                     clearVoices()
                     activeInstrument = inst
-                    if (!muted && notes.isNotEmpty() && !rhythmOn) strum(true, 1f)
+                    if (!muted && notes.isNotEmpty() && !rhythmOn) schedule(onceStep(), false)
                 }
                 val piano = activeInstrument == 1
 
@@ -401,8 +392,23 @@ class ChordSynth {
                         for (k in 0 until MAX_STRINGS) countdown[k] = -1
                     } else {
                         muted = false
-                        if (!rhythmOn) strum(true, 1f)
+                        // piyano pedalı: önceki akorun notaları hızla bırakılır
+                        if (piano) for (v in voices) v.release()
+                        if (!rhythmOn) schedule(onceStep(), false)
                     }
+                }
+
+                // Kalıp ya da davul değişti mi?
+                val pat = pattern
+                if (pat !== activePattern) {
+                    activePattern = pat
+                    step = 0
+                }
+                val di = drumIdx
+                if (di != lastDrum || activePattern.length != lastLen) {
+                    lastDrum = di
+                    lastLen = activePattern.length
+                    drumRows = DrumKits.rows(lastDrum, lastLen)
                 }
 
                 val rOn = rhythmOn
@@ -413,7 +419,9 @@ class ChordSynth {
                 wasRunning = rOn
                 val stepSamples = maxOf(1000, sampleRate * 60 / (bpm * 2))
 
-                val decay = if (muted) MUTED else SUSTAIN
+                val damping = dampLeft > 0
+                val decay = if (muted) MUTED else if (damping) DAMP else SUSTAIN
+                val pianoDamp = muted || damping
                 val target = volume
                 val cutoff = 1500f + brightness * brightness * 9000f
                 val a = 1f - exp(-2f * PI.toFloat() * cutoff / sampleRate)
@@ -424,7 +432,7 @@ class ChordSynth {
                     if (rOn) {
                         if (stepCountdown <= 0) {
                             fireStep(step)
-                            step = (step + 1) and 7
+                            step = (step + 1) % activePattern.length
                             stepCountdown += stepSamples
                         }
                         stepCountdown--
@@ -446,7 +454,7 @@ class ChordSynth {
                         } else if (cd > 0) {
                             countdown[k] = cd - 1
                         }
-                        s += if (piano) voices[k].next(muted) else strings[k].next(decay)
+                        s += if (piano) voices[k].next(pianoDamp) else strings[k].next(decay)
                     }
                     lp += a * (s * inScale - lp)
                     var out = lp * gain
@@ -477,6 +485,7 @@ class ChordSynth {
                     val soft = out / (1f + abs(out)) // yumuşak kırpma
                     buf[i] = (soft * 32767f).toInt().coerceIn(-32768, 32767).toShort()
                 }
+                if (dampLeft > 0) dampLeft -= buf.size
                 track.write(buf, 0, buf.size)
             }
             track.stop()
